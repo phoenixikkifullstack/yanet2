@@ -48,6 +48,5 @@ jobs:
                                                 --exclude operators/bird-adapter \
                                                 --exclude modules/acl \
                                                 --exclude modules/balancer \
-                                                --exclude modules/balancer2 \
                                                 --exclude modules/fwstate \
                                                 --exclude modules/route-mpls
