@@ -12,6 +12,7 @@ use fwstatepb::{
     DeleteConfigRequest, Direction, GetStatsRequest, LinkFwStateRequest, ListConfigsRequest, ListEntriesRequest,
     ShowConfigRequest, UpdateConfigRequest, fw_state_service_client::FwStateServiceClient,
 };
+use netip::MacAddr;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -48,22 +49,6 @@ pub struct Cmd {
 fn parse_ipv6(s: &str) -> Result<IpAddress, Box<dyn Error>> {
     let addr: Ipv6Addr = s.parse()?;
     Ok(IpAddress { addr: addr.octets().to_vec() })
-}
-
-/// Parse MAC address from string to bytes
-fn parse_mac(s: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return Err(format!("invalid MAC address format: {}", s).into());
-    }
-
-    let mut bytes = Vec::with_capacity(6);
-    for part in parts {
-        let byte = u8::from_str_radix(part, 16).map_err(|_| format!("invalid MAC address byte: {}", part))?;
-        bytes.push(byte);
-    }
-
-    Ok(bytes)
 }
 
 pub struct FWStateService {
@@ -132,7 +117,8 @@ impl FWStateService {
         }
 
         if let Some(ref dst_ether) = cmd.dst_ether {
-            sync_config.dst_ether = parse_mac(dst_ether)?;
+            let mac: MacAddr = dst_ether.parse()?;
+            sync_config.dst_ether = Some(mac.into());
         }
 
         if let Some(ref dst_addr_multicast) = cmd.dst_addr_multicast {
