@@ -1,7 +1,12 @@
 #include "dataplane.h"
 
 #include "config.h"
+#include "logging/log.h"
 #include "numa.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -27,6 +32,7 @@
 #include "lib/dataplane/config/bootstrap.h"
 #include "lib/dataplane/config/counter_storage.h"
 #include "lib/dataplane/config/module_loader.h"
+#include "lib/dataplane/config/plugin_loader.h"
 #include "lib/dataplane/config/topology.h"
 #include "lib/dataplane/packet/data.h"
 #include "lib/dataplane/packet/packet.h"
@@ -300,6 +306,18 @@ dataplane_init(
 
 	assert((uintptr_t)storage % page_size == 0);
 
+	// Load external module plugins (.so shared libraries).
+	memset(&dataplane->plugins, 0, sizeof(dataplane->plugins));
+	if (config->plugin_dir[0] != '\0') {
+		if (dp_load_plugins(config->plugin_dir, &dataplane->plugins) !=
+		    0) {
+			LOG(ERROR,
+			    "failed to load plugins from %s",
+			    config->plugin_dir);
+			return -1;
+		}
+	}
+
 	off_t instance_offset = 0;
 	for (uint32_t instance_idx = 0;
 	     instance_idx < dataplane->instance_count;
@@ -391,7 +409,7 @@ dataplane_init(
 		instance->dp_config->instance_idx = instance_idx;
 		instance->dp_config->instance_count = dataplane->instance_count;
 
-		static const char *modules[] = {
+		static const char *default_modules[] = {
 			"forward",
 			"route",
 			"decap",
@@ -403,10 +421,40 @@ dataplane_init(
 			"route_mpls",
 			"blackhole"
 		};
-		for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]);
+
+		for (size_t i = 0;
+		     i < sizeof(default_modules) / sizeof(default_modules[0]);
 		     ++i) {
 			if (dp_load_module(
-				    instance->dp_config, bin_hndl, modules[i]
+				    instance->dp_config,
+				    bin_hndl,
+				    &dataplane->plugins,
+				    default_modules[i]
+			    ) == -1) {
+				return -1;
+			}
+		}
+
+		for (uint64_t i = 0; i < config->module_count; ++i) {
+			bool is_default = false;
+			for (size_t j = 0; j < sizeof(default_modules
+					       ) / sizeof(default_modules[0]);
+			     ++j) {
+				if (strcmp(config->module_names[i],
+					   default_modules[j]) == 0) {
+					is_default = true;
+					break;
+				}
+			}
+			if (is_default) {
+				continue;
+			}
+
+			if (dp_load_module(
+				    instance->dp_config,
+				    bin_hndl,
+				    &dataplane->plugins,
+				    config->module_names[i]
 			    ) == -1) {
 				return -1;
 			}

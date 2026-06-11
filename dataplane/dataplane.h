@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "lib/dataplane/config/plugin_loader.h"
+
 struct dataplane_config;
 struct dataplane_device;
 
@@ -19,6 +21,8 @@ struct dataplane {
 
 	struct dataplane_device *devices;
 	uint32_t device_count;
+
+	struct plugin_registry plugins;
 };
 
 int
