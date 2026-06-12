@@ -116,9 +116,10 @@ pub struct RouteInsertCmd {
     /// Configuration name.
     #[arg(long = "name", short = 'n')]
     pub name: String,
-    /// Next-hop IP address.
-    #[arg(long = "via")]
-    pub nexthop_addr: IpAddr,
+    /// Next-hop IP address(es); repeat `--via` to specify multiple nexthops for
+    /// ECMP.
+    #[arg(long = "via", required = true)]
+    pub nexthop_addrs: Vec<IpAddr>,
     /// Route source type (static or bird). Defaults to static.
     #[arg(long = "source", default_value = "static")]
     pub source: RouteSource,
@@ -131,9 +132,10 @@ pub struct RouteRemoveCmd {
     /// Configuration name.
     #[arg(long = "name", short = 'n')]
     pub name: String,
-    /// Next-hop IP address.
-    #[arg(long = "via")]
-    pub nexthop_addr: IpAddr,
+    /// Next-hop IP address(es); repeat `--via` to specify multiple nexthops for
+    /// ECMP.
+    #[arg(long = "via", required = true)]
+    pub nexthop_addrs: Vec<IpAddr>,
     /// Route source type (static or bird). Defaults to static.
     #[arg(long = "source", default_value = "static")]
     pub source: RouteSource,
@@ -312,10 +314,12 @@ impl RouteService {
     }
 
     pub async fn insert_route(&mut self, cmd: RouteInsertCmd) -> Result<(), Error> {
+        let nexthop_addrs = cmd.nexthop_addrs.iter().copied().map(Into::into).collect();
+
         let request = InsertRouteRequest {
             name: cmd.name.clone(),
             prefix: cmd.prefix.to_string(),
-            nexthop_addr: Some(cmd.nexthop_addr.into()),
+            nexthop_addrs,
             do_flush: true,
             source_id: cmd.source.to_proto().into(),
         };
@@ -325,12 +329,19 @@ impl RouteService {
             .await
             .map_err(self.map_err("insert"))?;
 
+        let via = cmd
+            .nexthop_addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
         output::success(
             "insert",
             format_args!(
                 "inserted {} via {} in {} (source: {})",
                 cmd.prefix,
-                cmd.nexthop_addr,
+                via,
                 cmd.name,
                 cmd.source.as_str()
             ),
@@ -340,10 +351,12 @@ impl RouteService {
     }
 
     pub async fn remove_route(&mut self, cmd: RouteRemoveCmd) -> Result<(), Error> {
+        let nexthop_addrs = cmd.nexthop_addrs.iter().copied().map(Into::into).collect();
+
         let request = DeleteRouteRequest {
             name: cmd.name.clone(),
             prefix: cmd.prefix.to_string(),
-            nexthop_addr: Some(cmd.nexthop_addr.into()),
+            nexthop_addrs,
             do_flush: true,
             source_id: cmd.source.to_proto().into(),
         };
@@ -353,12 +366,19 @@ impl RouteService {
             .await
             .map_err(self.map_err("remove"))?;
 
+        let via = cmd
+            .nexthop_addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
         output::success(
             "remove",
             format_args!(
                 "removed {} via {} from {} (source: {})",
                 cmd.prefix,
-                cmd.nexthop_addr,
+                via,
                 cmd.name,
                 cmd.source.as_str()
             ),
@@ -731,6 +751,80 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// `--via ADDR PREFIX` must not consume the positional prefix as a second
+    /// nexthop.
+    #[test]
+    fn insert_via_does_not_consume_prefix() {
+        let cmd = Cmd::try_parse_from([
+            "yanet-cli-operator-route",
+            "insert",
+            "--via",
+            "192.0.2.1",
+            "10.0.0.0/8",
+            "-n",
+            "cfg",
+        ])
+        .expect("parse must succeed");
+
+        let ModeCmd::Insert(insert) = cmd.mode else {
+            panic!("expected Insert variant");
+        };
+
+        assert_eq!("10.0.0.0/8", insert.prefix.to_string());
+        assert_eq!(1, insert.nexthop_addrs.len());
+        assert_eq!("192.0.2.1", insert.nexthop_addrs[0].to_string());
+    }
+
+    /// Repeating `--via` accumulates nexthops for ECMP routes.
+    #[test]
+    fn insert_via_repeated_accumulates_nexthops() {
+        let cmd = Cmd::try_parse_from([
+            "yanet-cli-operator-route",
+            "insert",
+            "--via",
+            "192.0.2.1",
+            "--via",
+            "192.0.2.2",
+            "10.0.0.0/8",
+            "-n",
+            "cfg",
+        ])
+        .expect("parse must succeed");
+
+        let ModeCmd::Insert(insert) = cmd.mode else {
+            panic!("expected Insert variant");
+        };
+
+        assert_eq!("10.0.0.0/8", insert.prefix.to_string());
+        assert_eq!(2, insert.nexthop_addrs.len());
+        assert_eq!("192.0.2.1", insert.nexthop_addrs[0].to_string());
+        assert_eq!("192.0.2.2", insert.nexthop_addrs[1].to_string());
+    }
+
+    /// `--via ADDR PREFIX` in remove must not consume the positional prefix as
+    /// a second nexthop.
+    #[test]
+    fn remove_via_does_not_consume_prefix() {
+        let cmd = Cmd::try_parse_from([
+            "yanet-cli-operator-route",
+            "remove",
+            "--via",
+            "192.0.2.1",
+            "10.0.0.0/8",
+            "-n",
+            "cfg",
+        ])
+        .expect("parse must succeed");
+
+        let ModeCmd::Remove(remove) = cmd.mode else {
+            panic!("expected Remove variant");
+        };
+
+        assert_eq!("10.0.0.0/8", remove.prefix.to_string());
+        assert_eq!(1, remove.nexthop_addrs.len());
+        assert_eq!("192.0.2.1", remove.nexthop_addrs[0].to_string());
+    }
 
     #[test]
     fn format_age_none_returns_dash() {

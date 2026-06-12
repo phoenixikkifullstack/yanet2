@@ -180,16 +180,36 @@ func (m *RouteService) InsertRoute(
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse prefix %q: %v", req.GetPrefix(), err)
 	}
 
-	nexthopAddr, err := req.GetNexthopAddr().ToAddr()
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid nexthop_addr (bytes=%x): %v", req.GetNexthopAddr().GetAddr(), err)
+	addrs := req.GetNexthopAddrs()
+	if len(addrs) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one nexthop address is required")
+	}
+
+	nexthops := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		nexthop, parseErr := a.ToAddr()
+		if parseErr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid nexthop_addrs entry (bytes=%x): %v", a.GetAddr(), parseErr)
+		}
+		nexthops = append(nexthops, nexthop)
 	}
 
 	sourceID := req.RouteSourceID()
+
+	// Non-static sources use peer identity to distinguish routes: the unary
+	// InsertRoute API carries no peer, so consecutive AddUnicastRoute calls
+	// for the same (prefix, source) would silently replace one another.
+	// Reject the ambiguous case early rather than keeping only the last nexthop.
+	if sourceID != rib.RouteSourceStatic && len(nexthops) > 1 {
+		return nil, status.Error(codes.InvalidArgument, "multiple nexthops are only supported for static routes")
+	}
+
 	holder := m.getOrCreateRib(name)
 
-	if err := holder.AddUnicastRoute(prefix, nexthopAddr, sourceID); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to add unicast route: %v", err)
+	for _, nexthopAddr := range nexthops {
+		if err := holder.AddUnicastRoute(prefix, nexthopAddr, sourceID); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to add unicast route: %v", err)
+		}
 	}
 
 	// Wake the reconcile loop only when the caller explicitly asks for a
@@ -215,9 +235,18 @@ func (m *RouteService) DeleteRoute(
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse prefix: %v", err)
 	}
 
-	nexthopAddr, err := req.GetNexthopAddr().ToAddr()
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid nexthop_addr (bytes=%x): %v", req.GetNexthopAddr().GetAddr(), err)
+	addrs := req.GetNexthopAddrs()
+	if len(addrs) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one nexthop address is required")
+	}
+
+	nexthops := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		nexthop, parseErr := a.ToAddr()
+		if parseErr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid nexthop_addrs entry (bytes=%x): %v", a.GetAddr(), parseErr)
+		}
+		nexthops = append(nexthops, nexthop)
 	}
 
 	sourceID := req.RouteSourceID()
@@ -226,8 +255,10 @@ func (m *RouteService) DeleteRoute(
 		return &operatorpb.DeleteRouteResponse{}, nil
 	}
 
-	if err := holder.RemoveUnicastRoute(prefix, nexthopAddr, sourceID); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to remove unicast route: %v", err)
+	for _, nexthopAddr := range nexthops {
+		if err := holder.RemoveUnicastRoute(prefix, nexthopAddr, sourceID); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to remove unicast route: %v", err)
+		}
 	}
 
 	// Wake the reconcile loop only when the caller explicitly asks for a
