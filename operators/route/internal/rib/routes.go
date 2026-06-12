@@ -69,6 +69,25 @@ type Route struct {
 	ToRemove bool
 }
 
+// isSameIdentity reports whether two routes share the same RIB identity.
+//
+// BGP-sourced routes are identified by peer because of BGP implicit replace:
+// a peer re-announcing a prefix with a new nexthop must replace its previous
+// path (RFC 4271), so BGP ECMP arises across peers. Static routes are
+// peerless independent entries, so their identity includes the nexthop,
+// allowing multiple static routes for the same prefix with distinct nexthops
+// to coexist. Static nexthops are compared in normalized (unmapped) form
+// because the API accepts both native IPv4 and IPv4-in-IPv6 encodings.
+func (m Route) isSameIdentity(other Route) bool {
+	if m.SourceID != other.SourceID || m.Peer != other.Peer {
+		return false
+	}
+	if m.SourceID == RouteSourceStatic {
+		return m.NextHop.Unmap() == other.NextHop.Unmap()
+	}
+	return true
+}
+
 func routeCompare(a Route, b Route) int {
 	// higher priority is better
 	if prefDiff := int(a.Pref) - int(b.Pref); prefDiff != 0 {
@@ -97,7 +116,7 @@ type RoutesList struct {
 func (m *RoutesList) Insert(route Route) bool {
 	insertedIdx := -1
 	for idx, r := range m.Routes {
-		if r.Peer == route.Peer && r.SourceID == route.SourceID {
+		if r.isSameIdentity(route) {
 			m.Routes[idx] = route
 			insertedIdx = idx
 			break
@@ -116,7 +135,7 @@ func (m *RoutesList) Insert(route Route) bool {
 func (m *RoutesList) Remove(route Route) bool {
 	// Sorting is not need on removing
 	for idx, r := range m.Routes {
-		if r.Peer == route.Peer && r.SourceID == route.SourceID {
+		if r.isSameIdentity(route) {
 			// Delete with preserving order
 			m.Routes = slices.Delete(m.Routes, idx, idx+1)
 
