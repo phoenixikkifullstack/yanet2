@@ -37,14 +37,16 @@ func TestRouteComparator(t *testing.T) {
 
 	b.ASPathLen = 2
 	a.Med = 1
-	require.True(t, routeCompare(a, b) > 0)
+	// a has Med=1, b has Med=0; lower MED is better, so b beats a
+	require.True(t, routeCompare(a, b) < 0)
+	// c has ASPathLen=0 which beats both a and b (ASPathLen=2)
 	require.True(t, routeCompare(c, a) > 0)
 	require.True(t, routeCompare(c, b) > 0)
 
 	routes := []Route{a, b, c}
 	slices.SortFunc(routes, routeCompareRev)
-	// c hash ASPathLen == 0 so it is the best route now!
-	require.Equal(t, s(c, a, b), s(routes...))
+	// c has ASPathLen=0 so it is the best; among equal ASPathLen, b (Med=0) beats a (Med=1)
+	require.Equal(t, s(c, b, a), s(routes...))
 
 	b.Pref = 100
 	routes = []Route{a, b, c}
@@ -137,6 +139,87 @@ func TestRoutesListStaticECMP(t *testing.T) {
 		require.False(t, added, "bird re-announce from same peer should replace, not append")
 		require.Len(t, list.Routes, 1)
 		require.Equal(t, nh2, list.Routes[0].NextHop)
+	})
+}
+
+// TestBestPerSource verifies that BestPerSource returns the equal-cost group
+// for each source and filters routes that are strictly worse than the source's best.
+func TestBestPerSource(t *testing.T) {
+	pfx := netip.MustParsePrefix("10.0.0.0/24")
+	unspec := netip.IPv6Unspecified()
+	p1 := netip.MustParseAddr("192.0.2.1")
+	p2 := netip.MustParseAddr("192.0.2.2")
+
+	t.Run("routes with different Pref only best group survives", func(t *testing.T) {
+		list := RoutesList{
+			Routes: []Route{
+				// best (Pref=200)
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.1"), Peer: p1, SourceID: RouteSourceBird, Pref: 200},
+				// worse (Pref=100)
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.2"), Peer: p2, SourceID: RouteSourceBird, Pref: 100},
+			},
+		}
+		slices.SortFunc(list.Routes, routeCompareRev)
+
+		best := list.BestPerSource()
+		require.Len(t, best, 1)
+		require.Equal(t, netip.MustParseAddr("10.0.0.1"), best[0].NextHop)
+	})
+
+	t.Run("equal-cost routes from different peers all included", func(t *testing.T) {
+		list := RoutesList{
+			Routes: []Route{
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.1"), Peer: p1, SourceID: RouteSourceBird, Pref: 100},
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.2"), Peer: p2, SourceID: RouteSourceBird, Pref: 100},
+			},
+		}
+		slices.SortFunc(list.Routes, routeCompareRev)
+
+		best := list.BestPerSource()
+		require.Len(t, best, 2)
+	})
+
+	t.Run("static and bird on one prefix both groups in result", func(t *testing.T) {
+		list := RoutesList{
+			Routes: []Route{
+				// bird route is the overall best
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.1"), Peer: p1, SourceID: RouteSourceBird, Pref: 200},
+				// static route has lower overall Pref but is its own source
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.2"), Peer: unspec, SourceID: RouteSourceStatic, Pref: 100},
+			},
+		}
+		slices.SortFunc(list.Routes, routeCompareRev)
+
+		best := list.BestPerSource()
+		require.Len(t, best, 2, "both sources should appear in the best-per-source union")
+	})
+
+	t.Run("lower MED route wins when Pref and ASPathLen are equal", func(t *testing.T) {
+		list := RoutesList{
+			Routes: []Route{
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.1"), Peer: p1, SourceID: RouteSourceBird, Pref: 100, Med: 10},
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.2"), Peer: p2, SourceID: RouteSourceBird, Pref: 100, Med: 20},
+			},
+		}
+		slices.SortFunc(list.Routes, routeCompareRev)
+
+		best := list.BestPerSource()
+		require.Len(t, best, 1, "only the lower-MED route should survive")
+		require.Equal(t, netip.MustParseAddr("10.0.0.1"), best[0].NextHop)
+		require.Equal(t, uint32(10), best[0].Med)
+	})
+
+	t.Run("all equal-cost nothing filtered", func(t *testing.T) {
+		list := RoutesList{
+			Routes: []Route{
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.1"), Peer: p1, SourceID: RouteSourceBird, Pref: 100},
+				{Prefix: pfx, NextHop: netip.MustParseAddr("10.0.0.2"), Peer: p2, SourceID: RouteSourceBird, Pref: 100},
+			},
+		}
+		slices.SortFunc(list.Routes, routeCompareRev)
+
+		best := list.BestPerSource()
+		require.Len(t, best, len(list.Routes))
 	})
 }
 

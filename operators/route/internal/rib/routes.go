@@ -98,7 +98,8 @@ func routeCompare(a Route, b Route) int {
 	if asPathLenDiff := int(b.ASPathLen) - int(a.ASPathLen); asPathLenDiff != 0 {
 		return asPathLenDiff
 	}
-	return int(a.Med) - int(b.Med)
+	// lower MED is better (RFC 4271 §9.1.2.2)
+	return int(b.Med) - int(a.Med)
 }
 
 func routeCompareRev(a Route, b Route) int {
@@ -130,6 +131,33 @@ func (m *RoutesList) Insert(route Route) bool {
 		slices.SortFunc(m.Routes, routeCompareRev) // for DESC order
 	}
 	return insertedIdx == -1
+}
+
+// BestPerSource returns the best-cost group of routes for each distinct
+// SourceID.
+//
+// The list is assumed to be sorted best-first by routeCompareRev. For each
+// source, the method takes the first (best) route and every other route of
+// the same source whose cost is equal to that source's best cost. The returned
+// slice preserves the original order, which is deterministic because the input
+// slice is always sorted.
+func (m *RoutesList) BestPerSource() []Route {
+	// best stores the lowest-cost route seen so far for each SourceID.
+	best := map[RouteSourceID]Route{}
+
+	var result []Route
+	for _, r := range m.Routes {
+		b, seen := best[r.SourceID]
+		if !seen {
+			best[r.SourceID] = r
+			result = append(result, r)
+			continue
+		}
+		if routeCompare(r, b) == 0 {
+			result = append(result, r)
+		}
+	}
+	return result
 }
 
 func (m *RoutesList) Remove(route Route) bool {
