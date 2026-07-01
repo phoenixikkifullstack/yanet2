@@ -18,6 +18,7 @@ members = [
     "cli/modules/metrics",
     "cli/modules/device",
     "modules/acl/cli",
+    "modules/blackhole/cli",
     "modules/fwstate/cli",
     "modules/decap/cli",
     "modules/dscp/cli",
